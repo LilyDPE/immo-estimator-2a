@@ -6,24 +6,6 @@ const cache = new NodeCache({ stdTTL: 86400, checkperiod: 3600 });
 const DVF_API_BASE = 'https://api.cquest.org/dvf';
 const DVF_API_ETALAB = 'https://app.dvf.etalab.gouv.fr/api/v2';
 
-interface DVFApiResponse {
-  results: Array<{
-    id_mutation: string;
-    date_mutation: string;
-    valeur_fonciere: number;
-    type_local: string;
-    nombre_pieces_principales: number;
-    surface_reelle_bati: number;
-    code_postal: string;
-    nom_commune: string;
-    adresse_numero?: string;
-    adresse_nom_voie?: string;
-    latitude: string;
-    longitude: string;
-  }>;
-  count: number;
-}
-
 export async function searchComparableSales(
   latitude: number,
   longitude: number,
@@ -45,15 +27,6 @@ export async function searchComparableSales(
   try {
     const latDelta = radiusKm / 111;
     const lonDelta = radiusKm / (111 * Math.cos(latitude * Math.PI / 180));
-    
-    const minLat = latitude - latDelta;
-    const maxLat = latitude + latDelta;
-    const minLon = longitude - lonDelta;
-    const maxLon = longitude + lonDelta;
-
-    const threeYearsAgo = new Date();
-    threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
-    const minDate = threeYearsAgo.toISOString().split('T')[0];
 
     const params = new URLSearchParams({
       lat: latitude.toString(),
@@ -149,4 +122,46 @@ function calculateDistance(
 function removeOutliers(sales: DVFSale[]): DVFSale[] {
   if (sales.length < 3) return sales;
 
-  con
+  const pricesPerSqm = sales.map(s => s.pricePerSqm).sort((a, b) => a - b);
+  const median = pricesPerSqm[Math.floor(pricesPerSqm.length / 2)];
+  
+  const threshold = median * 0.3;
+
+  return sales.filter(sale => {
+    const diff = Math.abs(sale.pricePerSqm - median);
+    return diff <= threshold;
+  });
+}
+
+export async function getMarketStatistics(
+  latitude: number,
+  longitude: number,
+  radiusKm: number = 5
+): Promise<{
+  averagePrice: number;
+  medianPrice: number;
+  numberOfSales: number;
+  period: string;
+}> {
+  const sales = await searchComparableSales(latitude, longitude, 70, 3, radiusKm, 100);
+  
+  if (sales.length === 0) {
+    return {
+      averagePrice: 0,
+      medianPrice: 0,
+      numberOfSales: 0,
+      period: '3 dernières années'
+    };
+  }
+
+  const prices = sales.map(s => s.price).sort((a, b) => a - b);
+  const averagePrice = prices.reduce((sum, p) => sum + p, 0) / prices.length;
+  const medianPrice = prices[Math.floor(prices.length / 2)];
+
+  return {
+    averagePrice,
+    medianPrice,
+    numberOfSales: sales.length,
+    period: '3 dernières années'
+  };
+}
