@@ -4,6 +4,7 @@ import { PropertyDetails } from '@/types';
 import { z } from 'zod';
 
 const PropertySchema = z.object({
+  propertyType: z.enum(['apartment', 'house']),
   address: z.object({
     street: z.string().min(1, 'Adresse requise'),
     city: z.string().min(1, 'Ville requise'),
@@ -11,11 +12,16 @@ const PropertySchema = z.object({
   }),
   surface: z.number().min(10, 'Surface minimale: 10m²').max(1000, 'Surface maximale: 1000m²'),
   rooms: z.number().min(1, 'Minimum 1 pièce').max(20, 'Maximum 20 pièces'),
+  landArea: z.number().min(0).max(50000).optional(),
   dpe: z.enum(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'NC']).optional(),
   floor: z.number().min(0).max(50).optional(),
-  hasParking: z.boolean().optional(),
+  hasElevator: z.boolean().optional(),
+  constructionYear: z.number().min(1800).max(2025).optional(),
+  condition: z.enum(['new', 'renovated', 'good', 'to_renovate']).optional(),
+  parkingSpaces: z.number().min(0).max(10).optional(),
   hasCellar: z.boolean().optional(),
-  hasBalcony: z.boolean().optional(),
+  balconyArea: z.number().min(0).max(500).optional(),
+  hasPool: z.boolean().optional(),
 });
 
 export async function POST(request: NextRequest) {
