@@ -9,7 +9,7 @@ export function formatCurrency(amount: number): string {
 
 export function formatDate(dateString: string): string {
   const date = new Date(dateString);
-  return new Intl.DateFormat('fr-FR', {
+  return new Intl.DateTimeFormat('fr-FR', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
