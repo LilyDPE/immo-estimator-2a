@@ -1,5 +1,3 @@
-// Types pour l'application d'estimation immobilière
-
 export interface Address {
   street: string;
   city: string;
@@ -10,13 +8,19 @@ export interface Address {
 
 export interface PropertyDetails {
   address: Address;
-  surface: number; // m²
+  propertyType: 'apartment' | 'house';
+  surface: number;
   rooms: number;
+  landArea?: number;
   dpe?: DPEGrade;
   floor?: number;
-  hasParking?: boolean;
+  hasElevator?: boolean;
+  constructionYear?: number;
+  condition?: 'new' | 'renovated' | 'good' | 'to_renovate';
+  parkingSpaces?: number;
   hasCellar?: boolean;
-  hasBalcony?: boolean;
+  balconyArea?: number;
+  hasPool?: boolean;
 }
 
 export type DPEGrade = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'NC';
@@ -56,6 +60,9 @@ export interface EstimationResult {
     parking: number;
     cellar: number;
     balcony: number;
+    pool: number;
+    land: number;
+    condition: number;
   };
   marketAnalysis: {
     averagePrice: number;
