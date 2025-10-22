@@ -14,54 +14,63 @@ export async function searchComparableSales(
   const cacheKey = `dvf_${latitude}_${longitude}_${surface}_${rooms}_${radiusKm}`;
   
   const cached = cache.get<DVFSale[]>(cacheKey);
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
   try {
-    const url = `https://geo.api.gouv.fr/communes?lat=${latitude}&lon=${longitude}`;
-    const geoResponse = await fetch(url);
-    const geoData = await geoResponse.json();
+    const geoUrl = `https://geo.api.gouv.fr/communes?lat=${latitude}&lon=${longitude}&fields=code,nom`;
+    const geoRes = await fetch(geoUrl);
+    const geoData = await geoRes.json();
     
-    if (!geoData || geoData.length === 0) {
-      return [];
-    }
+    if (!geoData || geoData.length === 0) return [];
 
-    const codeCommune = geoData[0].code;
-    const dvfUrl = `https://api.cquest.org/dvf?code_commune=${codeCommune}`;
+    const code = geoData[0].code;
+    const nom = geoData[0].nom;
     
-    const response = await fetch(dvfUrl);
-    const data = await response.json();
+    console.log(`📍 Commune: ${nom} (${code})`);
 
-    if (!data.resultats) {
-      return [];
-    }
+    const today = new Date();
+    const threeYears = new Date(today.getFullYear() - 3, today.getMonth(), today.getDate());
+    const dateMin = threeYears.toISOString().split('T')[0];
 
-    const threeYearsAgo = new Date();
-    threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+    const dvfUrl = `https://app.dvf.etalab.gouv.fr/api/v2/transactions?code_commune=${code}&date_mutation_min=${dateMin}`;
+    
+    console.log(`🔗 DVF URL: ${dvfUrl}`);
+    
+    const res = await fetch(dvfUrl);
+    const data = await res.json();
 
-    const sales: DVFSale[] = data.resultats
-      .filter((s: any) => s.valeur_fonciere > 0 && s.surface_reelle_bati > 0 && new Date(s.date_mutation) >= threeYearsAgo)
+    console.log(`📦 DVF Response:`, data);
+
+    if (!data.results || data.results.length === 0) return [];
+
+    const sales: DVFSale[] = data.results
+      .filter((s: any) => 
+        s.valeur_fonciere > 0 && 
+        s.surface_reelle_bati > 0 &&
+        (s.type_local === 'Maison' || s.type_local === 'Appartement')
+      )
       .map((s: any) => ({
-        id: s.id_mutation || `${s.date_mutation}_${s.valeur_fonciere}`,
+        id: s.id_mutation,
         date: s.date_mutation,
         price: s.valeur_fonciere,
         surface: s.surface_reelle_bati,
         rooms: s.nombre_pieces_principales || rooms,
         type: s.type_local,
-        address: `${s.nom_commune}`,
-        latitude: parseFloat(s.latitude),
-        longitude: parseFloat(s.longitude),
+        address: `${s.adresse_nom_voie || s.nom_commune}`,
+        latitude: parseFloat(s.latitude) || latitude,
+        longitude: parseFloat(s.longitude) || longitude,
         distance: 0,
         pricePerSqm: s.valeur_fonciere / s.surface_reelle_bati,
       }))
       .slice(0, maxResults);
 
+    console.log(`✅ Found ${sales.length} sales`);
+    
     cache.set(cacheKey, sales);
     return sales;
 
   } catch (error) {
-    console.error('DVF error:', error);
+    console.error('❌ DVF error:', error);
     return [];
   }
 }
