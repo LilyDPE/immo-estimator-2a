@@ -107,8 +107,8 @@ export async function searchComparableSales(
           pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati)
         };
       })
-      .filter((s: DVFSale) => s.distance <= radiusKm)
-      .sort((a: DVFSale, b: DVFSale) => a.distance - b.distance)
+      .filter((s: DVFSale) => s.distance !== undefined && s.distance <= radiusKm)
+      .sort((a: DVFSale, b: DVFSale) => (a.distance || 0) - (b.distance || 0))
       .slice(0, maxResults);
 
     console.log(`✅ Found ${sales.length} comparable sales`);
