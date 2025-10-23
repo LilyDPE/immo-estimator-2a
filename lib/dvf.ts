@@ -173,10 +173,10 @@ export async function getMarketStatistics(
   radiusKm: number,
   postalCode: string
 ): Promise<{
-  totalSales: number;
-  avgPricePerSqm: number;
-  medianPricePerSqm: number;
-  avgPrice: number;
+  averagePrice: number;
+  medianPrice: number;
+  numberOfSales: number;
+  period: string;
 }> {
   console.log(`📊 Calcul des statistiques de marché pour le code postal ${postalCode}`);
 
@@ -185,10 +185,10 @@ export async function getMarketStatistics(
 
   if (dvfData.length === 0) {
     return {
-      totalSales: 0,
-      avgPricePerSqm: 0,
-      medianPricePerSqm: 0,
-      avgPrice: 0
+      averagePrice: 0,
+      medianPrice: 0,
+      numberOfSales: 0,
+      period: '3 dernières années'
     };
   }
 
@@ -223,20 +223,19 @@ export async function getMarketStatistics(
 
   if (allSales.length === 0) {
     return {
-      totalSales: 0,
-      avgPricePerSqm: 0,
-      medianPricePerSqm: 0,
-      avgPrice: 0
+      averagePrice: 0,
+      medianPrice: 0,
+      numberOfSales: 0,
+      period: '3 dernières années'
     };
   }
 
-  const pricesPerSqm = allSales.map(s => s.pricePerSqm).sort((a, b) => a - b);
-  const prices = allSales.map(s => s.price);
+  const prices = allSales.map(s => s.price).sort((a, b) => a - b);
 
   return {
-    totalSales: allSales.length,
-    avgPricePerSqm: Math.round(pricesPerSqm.reduce((a, b) => a + b, 0) / pricesPerSqm.length),
-    medianPricePerSqm: pricesPerSqm[Math.floor(pricesPerSqm.length / 2)],
-    avgPrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+    averagePrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length),
+    medianPrice: prices[Math.floor(prices.length / 2)],
+    numberOfSales: allSales.length,
+    period: '3 dernières années'
   };
 }
