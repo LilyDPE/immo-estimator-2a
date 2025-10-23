@@ -1,96 +1,130 @@
-import { createClient } from '@supabase/supabase-js';
-import { DVFSale } from '@/types';
+import NodeCache from 'node-cache';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+const cache = new NodeCache({ stdTTL: 86400 }); // 24h cache
+
+interface DVFSale {
+  date: string;
+  price: number;
+  surface: number;
+  pricePerSqm: number;
+  address: string;
+  distance?: number;
+}
+
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Rayon de la Terre en km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
 
 export async function searchComparableSales(
   latitude: number,
   longitude: number,
   surface: number,
-  rooms: number,
-  radiusKm: number = 2,
+  years: number = 3,
+  radiusKm: number = 5,
   maxResults: number = 50
 ): Promise<DVFSale[]> {
+  const cacheKey = `dvf_${latitude}_${longitude}_${surface}_${years}_${radiusKm}`;
+  
+  const cached = cache.get<DVFSale[]>(cacheKey);
+  if (cached) {
+    console.log('✅ Returning cached results');
+    return cached;
+  }
+
   try {
-    const geoUrl = `https://geo.api.gouv.fr/communes?lat=${latitude}&lon=${longitude}&fields=code,nom`;
-    const geoRes = await fetch(geoUrl);
-    const geoData = await geoRes.json();
+    console.log(`🔍 Searching DVF data for lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
     
-    if (!geoData || geoData.length === 0) return [];
+    // Calcul de la bounding box
+    const latDelta = (radiusKm / 111.32);
+    const lonDelta = (radiusKm / (111.32 * Math.cos(latitude * Math.PI / 180)));
+    
+    const minLat = latitude - latDelta;
+    const maxLat = latitude + latDelta;
+    const minLon = longitude - lonDelta;
+    const maxLon = longitude + lonDelta;
 
-    const codeCommune = geoData[0].code;
-    console.log(`📍 Recherche pour ${geoData[0].nom} (${codeCommune})`);
+    // Date limite (X années en arrière)
+    const startDate = new Date();
+    startDate.setFullYear(startDate.getFullYear() - years);
+    const dateStr = startDate.toISOString().split('T')[0];
 
-    const threeYearsAgo = new Date();
-    threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
-    const dateMin = threeYearsAgo.toISOString().split('T')[0];
+    // API DVF data.gouv.fr
+    const url = `https://apidf-preprod.cerema.fr/api/v1/transactions/recherche`;
+    
+    const body = {
+      rectangle: {
+        lat_min: minLat,
+        lat_max: maxLat,
+        lon_min: minLon,
+        lon_max: maxLon
+      },
+      date_min: dateStr,
+      nature_mutation: ["Vente"],
+      type_local: ["Maison", "Appartement"]
+    };
 
-    const { data, error } = await supabase
-      .from('ventes_dvf')
-      .select('*')
-      .eq('code_commune', codeCommune)
-      .gte('date_mutation', dateMin)
-      .in('type_local', ['Maison', 'Appartement'])
-      .gt('valeur_fonciere', 0)
-      .gt('surface_reelle_bati', 0)
-      .order('date_mutation', { ascending: false })
-      .limit(maxResults);
+    console.log('📡 API Request:', JSON.stringify(body, null, 2));
 
-    if (error) {
-      console.error('❌ Supabase error:', error);
-      return [];
-    }
-
-    if (!data || data.length === 0) {
-      console.log('⚠️ No sales found');
-      return [];
-    }
-
-    console.log(`✅ Found ${data.length} sales`);
-
-    const sales: DVFSale[] = data.map((row: any) => {
-      const lat = parseFloat(row.latitude) || latitude;
-      const lon = parseFloat(row.longitude) || longitude;
-      const distance = calculateDistance(latitude, longitude, lat, lon);
-
-      return {
-        id: row.id,
-        date: row.date_mutation,
-        price: row.valeur_fonciere,
-        surface: row.surface_reelle_bati,
-        rooms: row.nombre_pieces_principales || rooms,
-        type: row.type_local,
-        address: `${row.adresse_numero || ''} ${row.adresse_nom_voie || ''}, ${row.nom_commune}`.trim(),
-        latitude: lat,
-        longitude: lon,
-        distance,
-        pricePerSqm: row.valeur_fonciere / row.surface_reelle_bati,
-      };
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body)
     });
 
-    return sales.filter(s => s.distance !== undefined && s.distance <= radiusKm * 1000).sort((a, b) => a.distance! - b.distance!);
+    if (!response.ok) {
+      console.error(`❌ API Error: ${response.status} ${response.statusText}`);
+      return [];
+    }
+
+    const data = await response.json();
+    console.log(`📦 API returned ${data.resultats?.length || 0} results`);
+
+    if (!data.resultats || data.resultats.length === 0) {
+      console.log('⚠️ No results from API');
+      return [];
+    }
+
+    // Transformation et filtrage des résultats
+    const sales: DVFSale[] = data.resultats
+      .filter((r: any) => 
+        r.valeur_fonciere > 0 && 
+        r.surface_reelle_bati > 10 &&
+        r.latitude && r.longitude
+      )
+      .map((r: any) => {
+        const dist = calculateDistance(latitude, longitude, r.latitude, r.longitude);
+        return {
+          date: r.date_mutation,
+          price: r.valeur_fonciere,
+          surface: r.surface_reelle_bati,
+          pricePerSqm: Math.round(r.valeur_fonciere / r.surface_reelle_bati),
+          address: r.adresse_numero + ' ' + r.adresse_nom_voie + ', ' + r.code_commune,
+          distance: dist
+        };
+      })
+      .filter((s: DVFSale) => s.distance && s.distance <= radiusKm)
+      .sort((a: DVFSale, b: DVFSale) => (a.distance || 0) - (b.distance || 0))
+      .slice(0, maxResults);
+
+    console.log(`✅ Found ${sales.length} comparable sales`);
+    
+    cache.set(cacheKey, sales);
+    return sales;
 
   } catch (error) {
-    console.error('❌ Error:', error);
+    console.error('❌ DVF API Error:', error);
     return [];
   }
-}
-
-function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371e3;
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
-
-  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-  return R * c;
 }
 
 export async function getMarketStatistics(
@@ -106,47 +140,22 @@ export async function getMarketStatistics(
   const sales = await searchComparableSales(latitude, longitude, 70, 3, radiusKm, 100);
   
   if (sales.length === 0) {
-    return { averagePrice: 0, medianPrice: 0, numberOfSales: 0, period: '3 dernières années' };
+    return {
+      averagePrice: 0,
+      medianPrice: 0,
+      numberOfSales: 0,
+      period: '3 dernières années'
+    };
   }
 
-  const prices = sales.map(s => s.price).sort((a, b) => a - b);
-  const averagePrice = prices.reduce((sum, p) => sum + p, 0) / prices.length;
+  const prices = sales.map(s => s.pricePerSqm).sort((a, b) => a - b);
+  const averagePrice = Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length);
   const medianPrice = prices[Math.floor(prices.length / 2)];
 
-  return { averagePrice, medianPrice, numberOfSales: sales.length, period: '3 dernières années' };
-}
-
-export async function getSalesAtAddress(
-  address: string,
-  city: string,
-  postalCode: string
-): Promise<DVFSale[]> {
-  try {
-    const { data, error } = await supabase
-      .from('ventes_dvf')
-      .select('*')
-      .ilike('adresse_nom_voie', `%${address}%`)
-      .eq('code_postal', postalCode)
-      .order('date_mutation', { ascending: false });
-
-    if (error || !data) return [];
-
-    return data.map((row: any) => ({
-      id: row.id,
-      date: row.date_mutation,
-      price: row.valeur_fonciere,
-      surface: row.surface_reelle_bati,
-      rooms: row.nombre_pieces_principales || 0,
-      type: row.type_local,
-      address: `${row.adresse_numero || ''} ${row.adresse_nom_voie || ''}, ${row.nom_commune}`.trim(),
-      latitude: parseFloat(row.latitude) || 0,
-      longitude: parseFloat(row.longitude) || 0,
-      distance: 0,
-      pricePerSqm: row.valeur_fonciere / row.surface_reelle_bati,
-    }));
-
-  } catch (error) {
-    console.error('❌ Error fetching address history:', error);
-    return [];
-  }
+  return {
+    averagePrice,
+    medianPrice,
+    numberOfSales: sales.length,
+    period: '3 dernières années'
+  };
 }
