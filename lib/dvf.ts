@@ -141,3 +141,20 @@ export async function getMarketStatistics(
   if (sales.length === 0) {
     return {
       averagePrice: 0,
+      medianPrice: 0,
+      numberOfSales: 0,
+      period: '3 dernières années'
+    };
+  }
+
+  const prices = sales.map(s => s.pricePerSqm).sort((a, b) => a - b);
+  const avg = Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length);
+  const med = prices[Math.floor(prices.length / 2)];
+
+  return {
+    averagePrice: avg,
+    medianPrice: med,
+    numberOfSales: sales.length,
+    period: '3 dernières années'
+  };
+}
