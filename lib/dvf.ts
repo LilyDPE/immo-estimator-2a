@@ -121,10 +121,10 @@ export async function searchComparableSales(
   };
 
   const allowedTypes = typeLocalMapping[propertyType] || [];
-  const surfaceMin = targetSurface * 0.7;
-  const surfaceMax = targetSurface * 1.3;
+  const surfaceMin = targetSurface * 0.6; // 60% au lieu de 70%
+  const surfaceMax = targetSurface * 1.5; // 150% au lieu de 130%
   const threeYearsAgo = new Date();
-  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 5); // 5 ans au lieu de 3
 
   const sales: DVFSale[] = dvfData
     .filter(record => {
@@ -198,12 +198,12 @@ export async function getMarketStatistics(
       averagePrice: 0,
       medianPrice: 0,
       numberOfSales: 0,
-      period: '3 dernières années'
+      period: '5 dernières années'
     };
   }
 
   const threeYearsAgo = new Date();
-  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 5); // 5 ans pour cohérence
 
   const allSales = dvfData
     .filter(record => {
@@ -236,7 +236,7 @@ export async function getMarketStatistics(
       averagePrice: 0,
       medianPrice: 0,
       numberOfSales: 0,
-      period: '3 dernières années'
+      period: '5 dernières années'
     };
   }
 
@@ -246,6 +246,6 @@ export async function getMarketStatistics(
     averagePrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length),
     medianPrice: prices[Math.floor(prices.length / 2)],
     numberOfSales: allSales.length,
-    period: '3 dernières années'
+    period: '5 dernières années'
   };
 }
