@@ -59,6 +59,7 @@ export default function EstimationResults({ result, onNewEstimation }: Estimatio
                 <th className="px-4 py-3 text-left text-sm font-semibold">Adresse</th>
                 <th className="px-4 py-3 text-right text-sm font-semibold">Surface</th>
                 <th className="px-4 py-3 text-right text-sm font-semibold">Prix</th>
+                <th className="px-4 py-3 text-right text-sm font-semibold">Prix/m²</th>
                 <th className="px-4 py-3 text-right text-sm font-semibold">Distance</th>
               </tr>
             </thead>
@@ -69,6 +70,7 @@ export default function EstimationResults({ result, onNewEstimation }: Estimatio
                   <td className="px-4 py-3 text-sm">{sale.address}</td>
                   <td className="px-4 py-3 text-sm text-right">{sale.surface} m²</td>
                   <td className="px-4 py-3 text-sm text-right font-semibold">{formatCurrency(sale.price)}</td>
+                  <td className="px-4 py-3 text-sm text-right text-primary font-medium">{formatCurrency(sale.pricePerSqm)}/m²</td>
                   <td className="px-4 py-3 text-sm text-right">{Math.round(sale.distance!)}m</td>
                 </tr>
               ))}
