@@ -1,242 +1,42 @@
-import { DVFSale, PropertyType } from '@/types';
-
-const DVF_API_BASE = 'https://files.data.gouv.fr/geo-dvf/latest/csv';
-
-// Fonction pour extraire le département du code postal
-function getDepartmentFromPostalCode(postalCode: string): string {
-  // Les codes postaux français commencent par 2 ou 3 chiffres (département)
-  if (postalCode.startsWith('97') || postalCode.startsWith('98')) {
-    // DOM-TOM : 3 chiffres
-    return postalCode.substring(0, 3);
-  }
-  // Métropole : 2 chiffres
-  return postalCode.substring(0, 2);
-}
-
-// Cache pour stocker les données DVF par département
-const dvfCache: { [key: string]: any[] } = {};
-
-async function loadDVFDataForDepartment(postalCode: string): Promise<any[]> {
-  const department = getDepartmentFromPostalCode(postalCode);
-  
-  // Vérifier si les données sont déjà en cache
-  if (dvfCache[department]) {
-    console.log(`📦 Données DVF du département ${department} déjà en cache`);
-    return dvfCache[department];
-  }
-
-  console.log(`⬇️ Téléchargement des données DVF pour le département ${department}...`);
-  
-  const url = `${DVF_API_BASE}/${department}.csv`;
-  
-  try {
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      console.error(`❌ Erreur HTTP ${response.status} pour ${url}`);
-      return [];
-    }
-
-    const csvText = await response.text();
-    const lines = csvText.split('\n');
-    
-    if (lines.length < 2) {
-      console.error(`❌ Fichier CSV vide pour le département ${department}`);
-      return [];
-    }
-
-    const headers = lines[0].split(',');
-    const data = lines.slice(1)
-      .filter(line => line.trim().length > 0)
-      .map(line => {
-        const values = line.split(',');
-        const record: any = {};
-        headers.forEach((header, index) => {
-          record[header.trim()] = values[index] ? values[index].trim() : '';
-        });
-        return record;
-      });
-
-    console.log(`✅ ${data.length} transactions chargées pour le département ${department}`);
-    
-    // Mettre en cache
-    dvfCache[department] = data;
-    
-    return data;
-  } catch (error) {
-    console.error(`❌ Erreur lors du chargement des données DVF pour ${department}:`, error);
-    return [];
-  }
-}
-
-function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-export async function searchComparableSales(
-  latitude: number,
-  longitude: number,
-  radiusKm: number,
-  propertyType: PropertyType,
-  targetSurface: number,
-  postalCode: string // ✅ NOUVEAU PARAMÈTRE
-): Promise<DVFSale[]> {
-  console.log(`🔍 Recherche de comparables dans un rayon de ${radiusKm}km pour le code postal ${postalCode}`);
-
-  // Charger les données DVF du département
-  const dvfData = await loadDVFDataForDepartment(postalCode);
-
-  if (dvfData.length === 0) {
-    console.log('❌ Aucune donnée DVF disponible pour ce département');
-    return [];
-  }
-
-  const typeLocalMapping = {
-    apartment: ['Appartement'],
-    house: ['Maison']
-  };
-
-  const allowedTypes = typeLocalMapping[propertyType] || [];
-  const surfaceMin = targetSurface * 0.7;
-  const surfaceMax = targetSurface * 1.3;
-  const threeYearsAgo = new Date();
-  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
-
-  const sales: DVFSale[] = dvfData
-    .filter(record => {
-      // Filtrer par type de local
-      if (!allowedTypes.includes(record.type_local)) return false;
-
-      // Filtrer par surface
-      const surface = parseFloat(record.surface_reelle_bati);
-      if (isNaN(surface) || surface < surfaceMin || surface > surfaceMax) return false;
-
-      // Filtrer par date (3 dernières années)
-      const saleDate = new Date(record.date_mutation);
-      if (saleDate < threeYearsAgo) return false;
-
-      // Filtrer par prix (éliminer les valeurs aberrantes)
-      const price = parseFloat(record.valeur_fonciere);
-      if (isNaN(price) || price < 10000 || price > 10000000) return false;
-
-      // Vérifier les coordonnées GPS
-      const lat = parseFloat(record.latitude);
-      const lon = parseFloat(record.longitude);
-      if (isNaN(lat) || isNaN(lon)) return false;
-
-      // Filtrer par distance
-      const distance = haversineDistance(latitude, longitude, lat, lon);
-      if (distance > radiusKm) return false;
-
-      return true;
-    })
-    .map(record => {
-      const surface = parseFloat(record.surface_reelle_bati);
-      const price = parseFloat(record.valeur_fonciere);
-      const lat = parseFloat(record.latitude);
-      const lon = parseFloat(record.longitude);
-      const distance = haversineDistance(latitude, longitude, lat, lon);
-
-      return {
-        id: `${record.id_mutation}-${record.numero_disposition}`,
-        date: record.date_mutation,
-        price: price,
-        surface: surface,
-        pricePerSqm: Math.round(price / surface),
-        propertyType: record.type_local === 'Appartement' ? 'apartment' : 'house',
-        address: `${record.adresse_numero || ''} ${record.adresse_nom_voie || ''}, ${record.code_postal} ${record.nom_commune}`.trim(),
-        city: record.nom_commune,
-        postalCode: record.code_postal,
-        rooms: record.nombre_pieces_principales ? parseInt(record.nombre_pieces_principales) : undefined,
-        latitude: lat,
-        longitude: lon,
-        distance: distance,
-      } as DVFSale;
-    })
-    .sort((a, b) => a.distance! - b.distance!);
-
-  console.log(`✅ ${sales.length} ventes comparables trouvées`);
-  
-  return sales;
-}
-
-export async function getMarketStatistics(
-  latitude: number,
-  longitude: number,
-  radiusKm: number,
-  postalCode: string // ✅ NOUVEAU PARAMÈTRE
-): Promise<{
-  totalSales: number;
-  avgPricePerSqm: number;
-  medianPricePerSqm: number;
-  avgPrice: number;
-}> {
-  console.log(`📊 Calcul des statistiques de marché pour le code postal ${postalCode}`);
-
-  // Charger les données DVF du département
-  const dvfData = await loadDVFDataForDepartment(postalCode);
-
-  if (dvfData.length === 0) {
-    return {
-      totalSales: 0,
-      avgPricePerSqm: 0,
-      medianPricePerSqm: 0,
-      avgPrice: 0
-    };
-  }
-
-  const threeYearsAgo = new Date();
-  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
-
-  const allSales = dvfData
-    .filter(record => {
-      const saleDate = new Date(record.date_mutation);
-      if (saleDate < threeYearsAgo) return false;
-
-      const price = parseFloat(record.valeur_fonciere);
-      if (isNaN(price) || price < 10000 || price > 10000000) return false;
-
-      const surface = parseFloat(record.surface_reelle_bati);
-      if (isNaN(surface) || surface < 10 || surface > 500) return false;
-
-      const lat = parseFloat(record.latitude);
-      const lon = parseFloat(record.longitude);
-      if (isNaN(lat) || isNaN(lon)) return false;
-
-      const distance = haversineDistance(latitude, longitude, lat, lon);
-      if (distance > radiusKm) return false;
-
-      return true;
-    })
-    .map(record => ({
-      price: parseFloat(record.valeur_fonciere),
-      surface: parseFloat(record.surface_reelle_bati),
-      pricePerSqm: Math.round(parseFloat(record.valeur_fonciere) / parseFloat(record.surface_reelle_bati))
-    }));
-
-  if (allSales.length === 0) {
-    return {
-      totalSales: 0,
-      avgPricePerSqm: 0,
-      medianPricePerSqm: 0,
-      avgPrice: 0
-    };
-  }
-
-  const pricesPerSqm = allSales.map(s => s.pricePerSqm).sort((a, b) => a - b);
-  const prices = allSales.map(s => s.price);
-
-  return {
-    totalSales: allSales.length,
-    avgPricePerSqm: Math.round(pricesPerSqm.reduce((a, b) => a + b, 0) / pricesPerSqm.length),
-    medianPricePerSqm: pricesPerSqm[Math.floor(pricesPerSqm.length / 2)],
-    avgPrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
-  };
-}
+00:10:54.337 Running build in Washington, D.C., USA (East) – iad1
+00:10:54.364 Build machine configuration: 2 cores, 8 GB
+00:10:54.457 Cloning github.com/LilyDPE/immo-estimator-2a (Branch: main, Commit: 104b266)
+00:10:55.418 Cloning completed: 961.000ms
+00:10:56.457 Restored build cache from previous deployment (CkizcBDhxQP3DpB6ud2y9NPk3LY3)
+00:10:57.138 Running "vercel build"
+00:10:57.516 Vercel CLI 48.5.0
+00:10:57.813 Running "install" command: `npm install`...
+00:10:59.326 
+00:10:59.327 up to date, audited 441 packages in 1s
+00:10:59.328 
+00:10:59.328 156 packages are looking for funding
+00:10:59.328   run `npm fund` for details
+00:10:59.332 
+00:10:59.333 3 vulnerabilities (1 moderate, 2 high)
+00:10:59.333 
+00:10:59.333 To address all issues (including breaking changes), run:
+00:10:59.333   npm audit fix --force
+00:10:59.334 
+00:10:59.334 Run `npm audit` for details.
+00:10:59.360 Detected Next.js version: 14.2.33
+00:10:59.361 Running "next build"
+00:11:00.020   ▲ Next.js 14.2.33
+00:11:00.021 
+00:11:00.067    Creating an optimized production build ...
+00:11:00.628  ⚠ Found lockfile missing swc dependencies, run next locally to automatically patch
+00:11:02.973  ⚠ Found lockfile missing swc dependencies, run next locally to automatically patch
+00:11:03.858  ⚠ Found lockfile missing swc dependencies, run next locally to automatically patch
+00:11:04.714  ✓ Compiled successfully
+00:11:04.715    Linting and checking validity of types ...
+00:11:08.687 Failed to compile.
+00:11:08.688 
+00:11:08.688 ./lib/dvf.ts:1:19
+00:11:08.688 Type error: Module '"@/types"' has no exported member 'PropertyType'.
+00:11:08.688 
+00:11:08.689 [0m[31m[1m>[22m[39m[90m 1 |[39m [36mimport[39m { [33mDVFSale[39m[33m,[39m [33mPropertyType[39m } [36mfrom[39m [32m'@/types'[39m[33m;[39m[0m
+00:11:08.689 [0m [90m   |[39m                   [31m[1m^[22m[39m[0m
+00:11:08.689 [0m [90m 2 |[39m[0m
+00:11:08.689 [0m [90m 3 |[39m [36mconst[39m [33mDVF_API_BASE[39m [33m=[39m [32m'https://files.data.gouv.fr/geo-dvf/latest/csv'[39m[33m;[39m[0m
+00:11:08.689 [0m [90m 4 |[39m[0m
+00:11:08.704 Next.js build worker exited with code: 1 and signal: null
+00:11:08.716 Error: Command "next build" exited with 1
