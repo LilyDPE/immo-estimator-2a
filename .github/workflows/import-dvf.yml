@@ -3,27 +3,17 @@ name: Import DVF Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 1 4,10 *'
+    - cron: '0 2 1 4,10 *' # 1er avril et octobre à 2h du matin
 
 jobs:
-  import:
+  trigger-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Install dependencies
-        run: npm install @supabase/supabase-js
-      
-      - name: Run import script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: node scripts/import-dvf.js
+      - name: Trigger Supabase Edge Function
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.SUPABASE_URL }}/functions/v1/import-dvf"
