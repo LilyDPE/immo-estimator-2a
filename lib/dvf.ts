@@ -150,7 +150,7 @@ export async function searchComparableSales(
         price: price,
         surface: surface,
         pricePerSqm: Math.round(price / surface),
-        propertyType: record.type_local === 'Appartement' ? 'apartment' : 'house',
+        type: record.type_local === 'Appartement' ? 'apartment' : 'house',
         address: `${record.adresse_numero || ''} ${record.adresse_nom_voie || ''}, ${record.code_postal} ${record.nom_commune}`.trim(),
         city: record.nom_commune,
         postalCode: record.code_postal,
