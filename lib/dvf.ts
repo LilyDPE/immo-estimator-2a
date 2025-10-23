@@ -1,240 +1,242 @@
-import { PropertyDetails, EstimationResult, DVFSale, DPEGrade } from '@/types';
-import { searchComparableSales, getMarketStatistics } from './dvf';
+import { DVFSale, PropertyType } from '@/types';
 
-const INITIAL_RADIUS_KM = 1;
-const MAX_RADIUS_KM = 10;
-const RADIUS_STEP_KM = 1;
-const MIN_COMPARABLES = 3;
+const DVF_API_BASE = 'https://files.data.gouv.fr/geo-dvf/latest/csv';
 
-async function geocodeAddress(address: string, postalCode: string, city: string): Promise<{ latitude: number; longitude: number }> {
-  const fullAddress = `${address}, ${postalCode} ${city}, France`;
-  const encodedAddress = encodeURIComponent(fullAddress);
-  const url = `https://api-adresse.data.gouv.fr/search/?q=${encodedAddress}&limit=1`;
-
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error('Erreur lors du géocodage de l\'adresse');
+// Fonction pour extraire le département du code postal
+function getDepartmentFromPostalCode(postalCode: string): string {
+  // Les codes postaux français commencent par 2 ou 3 chiffres (département)
+  if (postalCode.startsWith('97') || postalCode.startsWith('98')) {
+    // DOM-TOM : 3 chiffres
+    return postalCode.substring(0, 3);
   }
-
-  const data = await response.json();
-  if (!data.features || data.features.length === 0) {
-    throw new Error('Adresse introuvable');
-  }
-
-  const [longitude, latitude] = data.features[0].geometry.coordinates;
-  return { latitude, longitude };
+  // Métropole : 2 chiffres
+  return postalCode.substring(0, 2);
 }
 
-export async function estimateProperty(property: PropertyDetails): Promise<EstimationResult> {
-  const geocoding = await geocodeAddress(
-    property.address.street,
-    property.address.postalCode,
-    property.address.city
-  );
+// Cache pour stocker les données DVF par département
+const dvfCache: { [key: string]: any[] } = {};
 
-  let comparables: DVFSale[] = [];
-  let currentRadius = INITIAL_RADIUS_KM;
-
-  while (comparables.length < MIN_COMPARABLES && currentRadius <= MAX_RADIUS_KM) {
-    const newComparables = await searchComparableSales(
-      geocoding.latitude,
-      geocoding.longitude,
-      currentRadius,
-      property.propertyType,
-      property.surface,
-      property.address.postalCode // ✅ AJOUTÉ
-    );
-
-    comparables = [...comparables, ...newComparables].filter((sale, index, self) =>
-      index === self.findIndex(s => s.id === sale.id)
-    );
-
-    if (comparables.length < MIN_COMPARABLES) {
-      currentRadius += RADIUS_STEP_KM;
-    }
+async function loadDVFDataForDepartment(postalCode: string): Promise<any[]> {
+  const department = getDepartmentFromPostalCode(postalCode);
+  
+  // Vérifier si les données sont déjà en cache
+  if (dvfCache[department]) {
+    console.log(`📦 Données DVF du département ${department} déjà en cache`);
+    return dvfCache[department];
   }
 
-  const radiusUsed = currentRadius;
-
-  if (comparables.length < MIN_COMPARABLES) {
-    const marketAnalysis = await getMarketStatistics(
-      geocoding.latitude,
-      geocoding.longitude,
-      5,
-      property.address.postalCode // ✅ AJOUTÉ
-    );
-
-    return {
-      property: {
-        ...property,
-        address: { ...property.address, latitude: geocoding.latitude, longitude: geocoding.longitude }
-      },
-      estimatedPrice: { low: 0, median: 0, high: 0 },
-      pricePerSqm: { low: 0, median: 0, high: 0 },
-      comparables: [],
-      confidenceScore: 0,
-      confidenceStars: 0,
-      adjustments: { dpe: 0, floor: 0, parking: 0, cellar: 0, balcony: 0, pool: 0, land: 0, condition: 0 },
-      marketAnalysis,
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  const weightedPricesPerSqm = comparables.map(sale => {
-    const distanceWeight = Math.max(0.1, 1 - (sale.distance! / (radiusUsed * 1000)));
-    const saleDate = new Date(sale.date);
-    const monthsAgo = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
-    const ageWeight = Math.max(0.3, 1 - (monthsAgo / 36));
-    const surfaceDiff = Math.abs(sale.surface - property.surface) / property.surface;
-    const surfaceWeight = Math.max(0.5, 1 - surfaceDiff);
-    const totalWeight = distanceWeight * ageWeight * surfaceWeight;
+  console.log(`⬇️ Téléchargement des données DVF pour le département ${department}...`);
+  
+  const url = `${DVF_API_BASE}/${department}.csv`;
+  
+  try {
+    const response = await fetch(url);
     
-    return { pricePerSqm: sale.pricePerSqm, weight: totalWeight };
-  });
-
-  const sortedPrices = weightedPricesPerSqm.sort((a, b) => a.pricePerSqm - b.pricePerSqm);
-  const totalWeight = sortedPrices.reduce((sum, p) => sum + p.weight, 0);
-  let cumulativeWeight = 0;
-  let medianPricePerSqm = sortedPrices[Math.floor(sortedPrices.length / 2)].pricePerSqm;
-  
-  for (const item of sortedPrices) {
-    cumulativeWeight += item.weight;
-    if (cumulativeWeight >= totalWeight / 2) {
-      medianPricePerSqm = item.pricePerSqm;
-      break;
+    if (!response.ok) {
+      console.error(`❌ Erreur HTTP ${response.status} pour ${url}`);
+      return [];
     }
+
+    const csvText = await response.text();
+    const lines = csvText.split('\n');
+    
+    if (lines.length < 2) {
+      console.error(`❌ Fichier CSV vide pour le département ${department}`);
+      return [];
+    }
+
+    const headers = lines[0].split(',');
+    const data = lines.slice(1)
+      .filter(line => line.trim().length > 0)
+      .map(line => {
+        const values = line.split(',');
+        const record: any = {};
+        headers.forEach((header, index) => {
+          record[header.trim()] = values[index] ? values[index].trim() : '';
+        });
+        return record;
+      });
+
+    console.log(`✅ ${data.length} transactions chargées pour le département ${department}`);
+    
+    // Mettre en cache
+    dvfCache[department] = data;
+    
+    return data;
+  } catch (error) {
+    console.error(`❌ Erreur lors du chargement des données DVF pour ${department}:`, error);
+    return [];
   }
-
-  const p25Index = Math.floor(sortedPrices.length * 0.25);
-  const p75Index = Math.floor(sortedPrices.length * 0.75);
-  const lowPricePerSqm = sortedPrices[p25Index].pricePerSqm;
-  const highPricePerSqm = sortedPrices[p75Index].pricePerSqm;
-
-  const adjustments = calculateAdjustments(property, medianPricePerSqm);
-  
-  const adjustedMedianPricePerSqm = medianPricePerSqm + adjustments.dpe;
-  const basePrice = adjustedMedianPricePerSqm * property.surface;
-  
-  const totalAdjustments = adjustments.floor + adjustments.parking + adjustments.cellar + 
-                          adjustments.balcony + adjustments.pool + adjustments.land + adjustments.condition;
-  
-  const estimatedPrice = {
-    low: Math.round((lowPricePerSqm * property.surface + totalAdjustments * 0.8) / 1000) * 1000,
-    median: Math.round((basePrice + totalAdjustments) / 1000) * 1000,
-    high: Math.round((highPricePerSqm * property.surface + totalAdjustments * 1.2) / 1000) * 1000,
-  };
-
-  const pricePerSqm = {
-    low: Math.round(lowPricePerSqm),
-    median: Math.round(adjustedMedianPricePerSqm),
-    high: Math.round(highPricePerSqm),
-  };
-
-  const confidenceScore = calculateConfidenceScore(comparables, geocoding.latitude, geocoding.longitude, radiusUsed);
-  const confidenceStars = Math.ceil(confidenceScore / 20);
-
-  const marketAnalysis = await getMarketStatistics(
-    geocoding.latitude, 
-    geocoding.longitude, 
-    5,
-    property.address.postalCode // ✅ AJOUTÉ
-  );
-
-  return {
-    property: {
-      ...property,
-      address: { ...property.address, latitude: geocoding.latitude, longitude: geocoding.longitude }
-    },
-    estimatedPrice,
-    pricePerSqm,
-    comparables: comparables.slice(0, 23),
-    confidenceScore,
-    confidenceStars,
-    adjustments: {
-      dpe: Math.round(adjustments.dpe * property.surface),
-      floor: adjustments.floor,
-      parking: adjustments.parking,
-      cellar: adjustments.cellar,
-      balcony: adjustments.balcony,
-      pool: adjustments.pool,
-      land: adjustments.land,
-      condition: adjustments.condition,
-    },
-    marketAnalysis,
-    createdAt: new Date().toISOString(),
-  };
 }
 
-function calculateAdjustments(property: PropertyDetails, basePricePerSqm: number) {
-  let dpeAdjustment = 0;
-  let floorAdjustment = 0;
-  let conditionAdjustment = 0;
-  let landAdjustment = 0;
-  
-  if (property.dpe) {
-    const dpeValues: Record<DPEGrade, number> = {
-      'A': 0.10, 'B': 0.05, 'C': 0, 'D': 0, 'E': -0.05, 'F': -0.10, 'G': -0.15, 'NC': 0
-    };
-    dpeAdjustment = basePricePerSqm * dpeValues[property.dpe];
-  }
-
-  if (property.propertyType === 'apartment' && property.floor !== undefined) {
-    if (property.floor === 0) {
-      floorAdjustment = property.hasElevator ? -3000 : -5000;
-    } else if (property.floor > 4) {
-      const floorsAbove4 = property.floor - 4;
-      floorAdjustment = property.hasElevator ? Math.min(floorsAbove4 * 2000, 10000) : Math.min(floorsAbove4 * 3000, 15000);
-    }
-  }
-
-  if (property.condition) {
-    const conditionValues = {
-      'new': 20000,
-      'renovated': 10000,
-      'good': 0,
-      'to_renovate': -15000
-    };
-    conditionAdjustment = conditionValues[property.condition];
-  }
-
-  if (property.landArea && property.propertyType === 'house') {
-    landAdjustment = Math.min(property.landArea * 50, 50000);
-  }
-
-  return {
-    dpe: dpeAdjustment,
-    floor: floorAdjustment,
-    parking: (property.parkingSpaces || 0) * 15000,
-    cellar: property.hasCellar ? 5000 : 0,
-    balcony: property.balconyArea ? Math.min(property.balconyArea * 500, 15000) : 0,
-    pool: property.hasPool ? 25000 : 0,
-    land: landAdjustment,
-    condition: conditionAdjustment,
-  };
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-function calculateConfidenceScore(comparables: DVFSale[], targetLat: number, targetLon: number, radiusUsed: number): number {
-  let score = 0;
-  const countScore = Math.min((comparables.length / 20) * 40, 40);
-  score += countScore;
+export async function searchComparableSales(
+  latitude: number,
+  longitude: number,
+  radiusKm: number,
+  propertyType: PropertyType,
+  targetSurface: number,
+  postalCode: string // ✅ NOUVEAU PARAMÈTRE
+): Promise<DVFSale[]> {
+  console.log(`🔍 Recherche de comparables dans un rayon de ${radiusKm}km pour le code postal ${postalCode}`);
+
+  // Charger les données DVF du département
+  const dvfData = await loadDVFDataForDepartment(postalCode);
+
+  if (dvfData.length === 0) {
+    console.log('❌ Aucune donnée DVF disponible pour ce département');
+    return [];
+  }
+
+  const typeLocalMapping = {
+    apartment: ['Appartement'],
+    house: ['Maison']
+  };
+
+  const allowedTypes = typeLocalMapping[propertyType] || [];
+  const surfaceMin = targetSurface * 0.7;
+  const surfaceMax = targetSurface * 1.3;
+  const threeYearsAgo = new Date();
+  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+
+  const sales: DVFSale[] = dvfData
+    .filter(record => {
+      // Filtrer par type de local
+      if (!allowedTypes.includes(record.type_local)) return false;
+
+      // Filtrer par surface
+      const surface = parseFloat(record.surface_reelle_bati);
+      if (isNaN(surface) || surface < surfaceMin || surface > surfaceMax) return false;
+
+      // Filtrer par date (3 dernières années)
+      const saleDate = new Date(record.date_mutation);
+      if (saleDate < threeYearsAgo) return false;
+
+      // Filtrer par prix (éliminer les valeurs aberrantes)
+      const price = parseFloat(record.valeur_fonciere);
+      if (isNaN(price) || price < 10000 || price > 10000000) return false;
+
+      // Vérifier les coordonnées GPS
+      const lat = parseFloat(record.latitude);
+      const lon = parseFloat(record.longitude);
+      if (isNaN(lat) || isNaN(lon)) return false;
+
+      // Filtrer par distance
+      const distance = haversineDistance(latitude, longitude, lat, lon);
+      if (distance > radiusKm) return false;
+
+      return true;
+    })
+    .map(record => {
+      const surface = parseFloat(record.surface_reelle_bati);
+      const price = parseFloat(record.valeur_fonciere);
+      const lat = parseFloat(record.latitude);
+      const lon = parseFloat(record.longitude);
+      const distance = haversineDistance(latitude, longitude, lat, lon);
+
+      return {
+        id: `${record.id_mutation}-${record.numero_disposition}`,
+        date: record.date_mutation,
+        price: price,
+        surface: surface,
+        pricePerSqm: Math.round(price / surface),
+        propertyType: record.type_local === 'Appartement' ? 'apartment' : 'house',
+        address: `${record.adresse_numero || ''} ${record.adresse_nom_voie || ''}, ${record.code_postal} ${record.nom_commune}`.trim(),
+        city: record.nom_commune,
+        postalCode: record.code_postal,
+        rooms: record.nombre_pieces_principales ? parseInt(record.nombre_pieces_principales) : undefined,
+        latitude: lat,
+        longitude: lon,
+        distance: distance,
+      } as DVFSale;
+    })
+    .sort((a, b) => a.distance! - b.distance!);
+
+  console.log(`✅ ${sales.length} ventes comparables trouvées`);
   
-  const avgDistance = comparables.reduce((sum, c) => sum + c.distance!, 0) / comparables.length;
-  const distanceScore = Math.max(0, 30 - (avgDistance / (radiusUsed * 500)) * 30);
-  score += distanceScore;
-  
-  const avgAge = comparables.reduce((sum, c) => {
-    const saleDate = new Date(c.date);
-    const monthsAgo = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
-    return sum + monthsAgo;
-  }, 0) / comparables.length;
-  const ageScore = Math.max(0, 15 - (avgAge / 6) * 15);
-  score += ageScore;
-  
-  const prices = comparables.map(c => c.pricePerSqm).sort((a, b) => a - b);
-  const median = prices[Math.floor(prices.length / 2)];
-  const dispersion = prices.reduce((sum, p) => sum + Math.abs(p - median), 0) / prices.length / median;
-  const dispersionScore = Math.max(0, 15 - dispersion * 150);
-  score += dispersionScore;
-  
-  return Math.round(Math.min(score, 100));
+  return sales;
+}
+
+export async function getMarketStatistics(
+  latitude: number,
+  longitude: number,
+  radiusKm: number,
+  postalCode: string // ✅ NOUVEAU PARAMÈTRE
+): Promise<{
+  totalSales: number;
+  avgPricePerSqm: number;
+  medianPricePerSqm: number;
+  avgPrice: number;
+}> {
+  console.log(`📊 Calcul des statistiques de marché pour le code postal ${postalCode}`);
+
+  // Charger les données DVF du département
+  const dvfData = await loadDVFDataForDepartment(postalCode);
+
+  if (dvfData.length === 0) {
+    return {
+      totalSales: 0,
+      avgPricePerSqm: 0,
+      medianPricePerSqm: 0,
+      avgPrice: 0
+    };
+  }
+
+  const threeYearsAgo = new Date();
+  threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+
+  const allSales = dvfData
+    .filter(record => {
+      const saleDate = new Date(record.date_mutation);
+      if (saleDate < threeYearsAgo) return false;
+
+      const price = parseFloat(record.valeur_fonciere);
+      if (isNaN(price) || price < 10000 || price > 10000000) return false;
+
+      const surface = parseFloat(record.surface_reelle_bati);
+      if (isNaN(surface) || surface < 10 || surface > 500) return false;
+
+      const lat = parseFloat(record.latitude);
+      const lon = parseFloat(record.longitude);
+      if (isNaN(lat) || isNaN(lon)) return false;
+
+      const distance = haversineDistance(latitude, longitude, lat, lon);
+      if (distance > radiusKm) return false;
+
+      return true;
+    })
+    .map(record => ({
+      price: parseFloat(record.valeur_fonciere),
+      surface: parseFloat(record.surface_reelle_bati),
+      pricePerSqm: Math.round(parseFloat(record.valeur_fonciere) / parseFloat(record.surface_reelle_bati))
+    }));
+
+  if (allSales.length === 0) {
+    return {
+      totalSales: 0,
+      avgPricePerSqm: 0,
+      medianPricePerSqm: 0,
+      avgPrice: 0
+    };
+  }
+
+  const pricesPerSqm = allSales.map(s => s.pricePerSqm).sort((a, b) => a - b);
+  const prices = allSales.map(s => s.price);
+
+  return {
+    totalSales: allSales.length,
+    avgPricePerSqm: Math.round(pricesPerSqm.reduce((a, b) => a + b, 0) / pricesPerSqm.length),
+    medianPricePerSqm: pricesPerSqm[Math.floor(pricesPerSqm.length / 2)],
+    avgPrice: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+  };
 }
