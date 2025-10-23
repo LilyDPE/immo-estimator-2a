@@ -22,24 +22,29 @@ function generateId(): string {
 }
 
 // Parser CSV simple (ligne par ligne)
-function parseCSVLine(line: string): any {
-  const values = line.split(',');
-  return {
-    id_mutation: values[0],
-    date_mutation: values[1],
-    nature_mutation: values[2],
-    valeur_fonciere: values[3],
-    adresse_numero: values[4],
-    adresse_nom_voie: values[5],
-    code_postal: values[6],
-    code_commune: values[7],
-    nom_commune: values[8],
-    type_local: values[9],
-    surface_reelle_bati: values[10],
-    nombre_pieces_principales: values[11],
-    latitude: values[12],
-    longitude: values[13]
-  };
+function parseCSVLine(line: string, headers: string[]): any {
+  const values: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      values.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  values.push(current.trim());
+
+  const obj: any = {};
+  headers.forEach((header, index) => {
+    obj[header] = values[index] || '';
+  });
+  return obj;
 }
 
 async function fetchDepartmentData(departement: string): Promise<string> {
@@ -91,9 +96,10 @@ export async function searchComparableSales(
   surface: number,
   years: number = 3,
   radiusKm: number = 5,
-  maxResults: number = 50
+  maxResults: number = 50,
+  codePostal?: string
 ): Promise<DVFSale[]> {
-  const cacheKey = `dvf_${latitude}_${longitude}_${surface}_${years}_${radiusKm}`;
+  const cacheKey = `dvf_${latitude}_${longitude}_${surface}_${years}_${radiusKm}_${codePostal}`;
   
   const cached = cache.get<DVFSale[]>(cacheKey);
   if (cached) {
@@ -102,30 +108,35 @@ export async function searchComparableSales(
   }
 
   try {
-    console.log(`🔍 Searching DVF: lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
+    console.log(`🔍 Searching DVF: lat=${latitude}, lon=${longitude}, radius=${radiusKm}km, postal=${codePostal}`);
     
-    // Déterminer le département à partir des coordonnées (approximatif)
-    const departement = String(Math.floor(latitude * 100) % 100).padStart(2, '0');
-    console.log(`📍 Department: ${departement}`);
+    // Extraire le département du code postal
+    const departement = codePostal ? codePostal.substring(0, 2) : '76';
+    console.log(`📍 Department from postal code: ${departement}`);
 
     // Télécharger les données du département
     const csvData = await fetchDepartmentData(departement);
 
     // Parser et filtrer
     const lines = csvData.split('\n');
-    const header = lines[0];
+    if (lines.length < 2) {
+      console.log('⚠️ No data in CSV');
+      return [];
+    }
+
+    const headers = lines[0].split(',').map(h => h.trim());
     console.log(`📊 Processing ${lines.length} lines`);
 
     const sales: DVFSale[] = [];
     const limitDate = new Date();
     limitDate.setFullYear(limitDate.getFullYear() - years);
 
-    for (let i = 1; i < lines.length && sales.length < maxResults; i++) {
+    for (let i = 1; i < lines.length && sales.length < maxResults * 3; i++) {
       const line = lines[i].trim();
       if (!line) continue;
 
       try {
-        const row = parseCSVLine(line);
+        const row = parseCSVLine(line, headers);
 
         // Filtres
         if (!row.latitude || !row.longitude) continue;
@@ -141,6 +152,8 @@ export async function searchComparableSales(
         // Calculer distance
         const lat = parseFloat(row.latitude);
         const lon = parseFloat(row.longitude);
+        if (isNaN(lat) || isNaN(lon)) continue;
+        
         const dist = calculateDistance(latitude, longitude, lat, lon);
 
         if (dist <= radiusKm) {
@@ -166,14 +179,15 @@ export async function searchComparableSales(
 
     // Trier par distance
     sales.sort((a, b) => (a.distance || 0) - (b.distance || 0));
+    const finalSales = sales.slice(0, maxResults);
 
-    console.log(`✅ Found ${sales.length} sales`);
+    console.log(`✅ Found ${finalSales.length} sales within ${radiusKm}km`);
     
-    if (sales.length > 0) {
-      cache.set(cacheKey, sales);
+    if (finalSales.length > 0) {
+      cache.set(cacheKey, finalSales);
     }
     
-    return sales;
+    return finalSales;
 
   } catch (error) {
     console.error('❌ Error:', error);
@@ -184,14 +198,15 @@ export async function searchComparableSales(
 export async function getMarketStatistics(
   latitude: number,
   longitude: number,
-  radiusKm: number = 5
+  radiusKm: number = 5,
+  codePostal?: string
 ): Promise<{
   averagePrice: number;
   medianPrice: number;
   numberOfSales: number;
   period: string;
 }> {
-  const sales = await searchComparableSales(latitude, longitude, 70, 3, radiusKm, 100);
+  const sales = await searchComparableSales(latitude, longitude, 70, 3, radiusKm, 100, codePostal);
   
   if (sales.length === 0) {
     return {
