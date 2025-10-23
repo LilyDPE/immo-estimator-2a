@@ -20,9 +20,10 @@ export async function estimateProperty(property: PropertyDetails): Promise<Estim
       geocoding.latitude,
       geocoding.longitude,
       property.surface,
-      property.rooms,
+      3, // years
       radius,
-      50
+      50,
+      property.address.postalCode // ⬅️ AJOUTÉ
     );
     
     if (comparables.length >= 3) {
@@ -32,7 +33,12 @@ export async function estimateProperty(property: PropertyDetails): Promise<Estim
   }
 
   if (comparables.length < 3) {
-    const marketStats = await getMarketStatistics(geocoding.latitude, geocoding.longitude, 15);
+    const marketStats = await getMarketStatistics(
+      geocoding.latitude, 
+      geocoding.longitude, 
+      15,
+      property.address.postalCode // ⬅️ AJOUTÉ
+    );
     
     throw new Error(
       `Données insuffisantes pour une estimation fiable (${comparables.length} vente(s) trouvée(s), minimum 3 requis).\n\n` +
@@ -95,7 +101,12 @@ export async function estimateProperty(property: PropertyDetails): Promise<Estim
   const confidenceScore = calculateConfidenceScore(comparables, geocoding.latitude, geocoding.longitude, radiusUsed);
   const confidenceStars = Math.ceil(confidenceScore / 20);
 
-  const marketAnalysis = await getMarketStatistics(geocoding.latitude, geocoding.longitude, 5);
+  const marketAnalysis = await getMarketStatistics(
+    geocoding.latitude, 
+    geocoding.longitude, 
+    5,
+    property.address.postalCode // ⬅️ AJOUTÉ
+  );
 
   return {
     property: {
@@ -147,51 +158,4 @@ function calculateAdjustments(property: PropertyDetails, basePricePerSqm: number
   if (property.condition) {
     const conditionValues = {
       'new': 20000,
-      'renovated': 10000,
-      'good': 0,
-      'to_renovate': -15000
-    };
-    conditionAdjustment = conditionValues[property.condition];
-  }
-
-  if (property.landArea && property.propertyType === 'house') {
-    landAdjustment = Math.min(property.landArea * 50, 50000);
-  }
-
-  return {
-    dpe: dpeAdjustment,
-    floor: floorAdjustment,
-    parking: (property.parkingSpaces || 0) * 15000,
-    cellar: property.hasCellar ? 5000 : 0,
-    balcony: property.balconyArea ? Math.min(property.balconyArea * 500, 15000) : 0,
-    pool: property.hasPool ? 25000 : 0,
-    land: landAdjustment,
-    condition: conditionAdjustment,
-  };
-}
-
-function calculateConfidenceScore(comparables: DVFSale[], targetLat: number, targetLon: number, radiusUsed: number): number {
-  let score = 0;
-  const countScore = Math.min((comparables.length / 20) * 40, 40);
-  score += countScore;
-  
-  const avgDistance = comparables.reduce((sum, c) => sum + c.distance!, 0) / comparables.length;
-  const distanceScore = Math.max(0, 30 - (avgDistance / (radiusUsed * 500)) * 30);
-  score += distanceScore;
-  
-  const avgAge = comparables.reduce((sum, c) => {
-    const saleDate = new Date(c.date);
-    const monthsAgo = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
-    return sum + monthsAgo;
-  }, 0) / comparables.length;
-  const ageScore = Math.max(0, 15 - (avgAge / 6) * 15);
-  score += ageScore;
-  
-  const prices = comparables.map(c => c.pricePerSqm).sort((a, b) => a - b);
-  const median = prices[Math.floor(prices.length / 2)];
-  const dispersion = prices.reduce((sum, p) => sum + Math.abs(p - median), 0) / prices.length / median;
-  const dispersionScore = Math.max(0, 15 - dispersion * 150);
-  score += dispersionScore;
-  
-  return Math.round(Math.min(score, 100));
-}
+      'ren
