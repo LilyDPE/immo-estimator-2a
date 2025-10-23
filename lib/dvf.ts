@@ -1,6 +1,6 @@
 import NodeCache from 'node-cache';
 
-const cache = new NodeCache({ stdTTL: 86400 }); // 24h cache
+const cache = new NodeCache({ stdTTL: 86400 }); // Cache 24h
 
 interface DVFSale {
   date: string;
@@ -12,7 +12,7 @@ interface DVFSale {
 }
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371; // Rayon de la Terre en km
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = 
@@ -35,94 +35,92 @@ export async function searchComparableSales(
   
   const cached = cache.get<DVFSale[]>(cacheKey);
   if (cached) {
-    console.log('✅ Returning cached results');
+    console.log('✅ Cache hit');
     return cached;
   }
 
   try {
-    console.log(`🔍 Searching DVF data for lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
+    console.log(`🔍 Searching DVF: lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
     
-    // Calcul de la bounding box
-    const latDelta = (radiusKm / 111.32);
-    const lonDelta = (radiusKm / (111.32 * Math.cos(latitude * Math.PI / 180)));
+    // Bounding box
+    const latDelta = radiusKm / 111.32;
+    const lonDelta = radiusKm / (111.32 * Math.cos(latitude * Math.PI / 180));
     
-    const minLat = latitude - latDelta;
-    const maxLat = latitude + latDelta;
-    const minLon = longitude - lonDelta;
-    const maxLon = longitude + lonDelta;
+    const lat_min = latitude - latDelta;
+    const lat_max = latitude + latDelta;
+    const lon_min = longitude - lonDelta;
+    const lon_max = longitude + lonDelta;
 
-    // Date limite (X années en arrière)
+    // Date (3 ans en arrière)
     const startDate = new Date();
     startDate.setFullYear(startDate.getFullYear() - years);
-    const dateStr = startDate.toISOString().split('T')[0];
+    const date_mutation = startDate.toISOString().split('T')[0];
 
-    // API DVF data.gouv.fr
-    const url = `https://apidf-preprod.cerema.fr/api/v1/transactions/recherche`;
-    
-    const body = {
-      rectangle: {
-        lat_min: minLat,
-        lat_max: maxLat,
-        lon_min: minLon,
-        lon_max: maxLon
-      },
-      date_min: dateStr,
-      nature_mutation: ["Vente"],
-      type_local: ["Maison", "Appartement"]
-    };
+    // Construction URL avec bounding box
+    const params = new URLSearchParams({
+      lat_min: lat_min.toString(),
+      lat_max: lat_max.toString(),
+      lon_min: lon_min.toString(),
+      lon_max: lon_max.toString(),
+      date_mutation: date_mutation
+    });
 
-    console.log('📡 API Request:', JSON.stringify(body, null, 2));
+    const url = `https://api.cquest.org/dvf?${params.toString()}`;
+    console.log('📡 API URL:', url);
 
     const response = await fetch(url, {
-      method: 'POST',
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
-      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
-      console.error(`❌ API Error: ${response.status} ${response.statusText}`);
+      console.error(`❌ API error: ${response.status}`);
       return [];
     }
 
     const data = await response.json();
-    console.log(`📦 API returned ${data.resultats?.length || 0} results`);
+    console.log(`📦 API returned ${data.features?.length || 0} features`);
 
-    if (!data.resultats || data.resultats.length === 0) {
-      console.log('⚠️ No results from API');
+    if (!data.features || data.features.length === 0) {
+      console.log('⚠️ No results');
       return [];
     }
 
-    // Transformation et filtrage des résultats
-    const sales: DVFSale[] = data.resultats
-      .filter((r: any) => 
-        r.valeur_fonciere > 0 && 
-        r.surface_reelle_bati > 10 &&
-        r.latitude && r.longitude
+    // Transformation
+    const sales: DVFSale[] = data.features
+      .filter((f: any) => 
+        f.properties?.valeur_fonciere > 0 && 
+        f.properties?.surface_reelle_bati > 10 &&
+        f.geometry?.coordinates?.[0] &&
+        f.geometry?.coordinates?.[1]
       )
-      .map((r: any) => {
-        const dist = calculateDistance(latitude, longitude, r.latitude, r.longitude);
+      .map((f: any) => {
+        const props = f.properties;
+        const [lon, lat] = f.geometry.coordinates;
+        const dist = calculateDistance(latitude, longitude, lat, lon);
+        
         return {
-          date: r.date_mutation,
-          price: r.valeur_fonciere,
-          surface: r.surface_reelle_bati,
-          pricePerSqm: Math.round(r.valeur_fonciere / r.surface_reelle_bati),
-          address: r.adresse_numero + ' ' + r.adresse_nom_voie + ', ' + r.code_commune,
+          date: props.date_mutation,
+          price: props.valeur_fonciere,
+          surface: props.surface_reelle_bati,
+          pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati),
+          address: `${props.adresse_numero || ''} ${props.adresse_nom_voie || ''}, ${props.code_commune || ''}`.trim(),
           distance: dist
         };
       })
-      .filter((s: DVFSale) => s.distance && s.distance <= radiusKm)
+      .filter((s: DVFSale) => s.distance !== undefined && s.distance <= radiusKm)
       .sort((a: DVFSale, b: DVFSale) => (a.distance || 0) - (b.distance || 0))
       .slice(0, maxResults);
 
-    console.log(`✅ Found ${sales.length} comparable sales`);
+    console.log(`✅ Found ${sales.length} sales`);
     
     cache.set(cacheKey, sales);
     return sales;
 
   } catch (error) {
-    console.error('❌ DVF API Error:', error);
+    console.error('❌ Error:', error);
     return [];
   }
 }
@@ -149,12 +147,12 @@ export async function getMarketStatistics(
   }
 
   const prices = sales.map(s => s.pricePerSqm).sort((a, b) => a - b);
-  const averagePrice = Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length);
-  const medianPrice = prices[Math.floor(prices.length / 2)];
+  const avg = Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length);
+  const med = prices[Math.floor(prices.length / 2)];
 
   return {
-    averagePrice,
-    medianPrice,
+    averagePrice: avg,
+    medianPrice: med,
     numberOfSales: sales.length,
     period: '3 dernières années'
   };
