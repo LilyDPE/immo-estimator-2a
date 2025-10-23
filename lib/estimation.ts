@@ -1,54 +1,86 @@
 import { PropertyDetails, EstimationResult, DVFSale, DPEGrade } from '@/types';
 import { searchComparableSales, getMarketStatistics } from './dvf';
-import { geocodeAddress } from './geocoding';
 
-export async function estimateProperty(property: PropertyDetails): Promise<EstimationResult> {
-  console.log('🏠 Starting property estimation...');
+const INITIAL_RADIUS_KM = 1;
+const MAX_RADIUS_KM = 10;
+const RADIUS_STEP_KM = 1;
+const MIN_COMPARABLES = 3;
 
-  let geocoding;
-  try {
-    geocoding = await geocodeAddress(property.address.street, property.address.city, property.address.postalCode);
-  } catch (error) {
-    throw new Error('Adresse introuvable. Vérifiez qu\'elle est correcte.');
+async function geocodeAddress(address: string, postalCode: string, city: string): Promise<{ latitude: number; longitude: number }> {
+  const fullAddress = `${address}, ${postalCode} ${city}, France`;
+  const encodedAddress = encodeURIComponent(fullAddress);
+  const url = `https://api-adresse.data.gouv.fr/search/?q=${encodedAddress}&limit=1`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error('Erreur lors du géocodage de l\'adresse');
   }
 
+  const data = await response.json();
+  if (!data.features || data.features.length === 0) {
+    throw new Error('Adresse introuvable');
+  }
+
+  const [longitude, latitude] = data.features[0].geometry.coordinates;
+  return { latitude, longitude };
+}
+
+export async function estimateProperty(property: PropertyDetails): Promise<EstimationResult> {
+  const geocoding = await geocodeAddress(
+    property.address.street,
+    property.address.postalCode,
+    property.address.city
+  );
+
   let comparables: DVFSale[] = [];
-  let radiusUsed = 2;
-  
-  for (const radius of [2, 5, 10]) {
-    comparables = await searchComparableSales(
+  let currentRadius = INITIAL_RADIUS_KM;
+
+  while (comparables.length < MIN_COMPARABLES && currentRadius <= MAX_RADIUS_KM) {
+    const newComparables = await searchComparableSales(
       geocoding.latitude,
       geocoding.longitude,
+      currentRadius,
+      property.propertyType,
       property.surface,
-      3, // years
-      radius,
-      50,
-      property.address.postalCode // ⬅️ AJOUTÉ
+      property.address.postalCode // ✅ AJOUTÉ
     );
-    
-    if (comparables.length >= 3) {
-      radiusUsed = radius;
-      break;
+
+    comparables = [...comparables, ...newComparables].filter((sale, index, self) =>
+      index === self.findIndex(s => s.id === sale.id)
+    );
+
+    if (comparables.length < MIN_COMPARABLES) {
+      currentRadius += RADIUS_STEP_KM;
     }
   }
 
-  if (comparables.length < 3) {
-    const marketStats = await getMarketStatistics(
-      geocoding.latitude, 
-      geocoding.longitude, 
-      15,
-      property.address.postalCode // ⬅️ AJOUTÉ
+  const radiusUsed = currentRadius;
+
+  if (comparables.length < MIN_COMPARABLES) {
+    const marketAnalysis = await getMarketStatistics(
+      geocoding.latitude,
+      geocoding.longitude,
+      5,
+      property.address.postalCode // ✅ AJOUTÉ
     );
-    
-    throw new Error(
-      `Données insuffisantes pour une estimation fiable (${comparables.length} vente(s) trouvée(s), minimum 3 requis).\n\n` +
-      `💡 Prix moyen indicatif dans la région : ${Math.round(marketStats.averagePrice / 1000)}K€\n` +
-      `Prix au m² moyen : ${Math.round(marketStats.medianPrice / 70)} €/m²\n\n` +
-      `Suggestion : Contactez-nous au 0686386259 pour une estimation manuelle personnalisée.`
-    );
+
+    return {
+      property: {
+        ...property,
+        address: { ...property.address, latitude: geocoding.latitude, longitude: geocoding.longitude }
+      },
+      estimatedPrice: { low: 0, median: 0, high: 0 },
+      pricePerSqm: { low: 0, median: 0, high: 0 },
+      comparables: [],
+      confidenceScore: 0,
+      confidenceStars: 0,
+      adjustments: { dpe: 0, floor: 0, parking: 0, cellar: 0, balcony: 0, pool: 0, land: 0, condition: 0 },
+      marketAnalysis,
+      createdAt: new Date().toISOString(),
+    };
   }
 
-  const weightedPricesPerSqm = comparables.map((sale) => {
+  const weightedPricesPerSqm = comparables.map(sale => {
     const distanceWeight = Math.max(0.1, 1 - (sale.distance! / (radiusUsed * 1000)));
     const saleDate = new Date(sale.date);
     const monthsAgo = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
@@ -105,7 +137,7 @@ export async function estimateProperty(property: PropertyDetails): Promise<Estim
     geocoding.latitude, 
     geocoding.longitude, 
     5,
-    property.address.postalCode // ⬅️ AJOUTÉ
+    property.address.postalCode // ✅ AJOUTÉ
   );
 
   return {
@@ -158,4 +190,51 @@ function calculateAdjustments(property: PropertyDetails, basePricePerSqm: number
   if (property.condition) {
     const conditionValues = {
       'new': 20000,
-      'ren
+      'renovated': 10000,
+      'good': 0,
+      'to_renovate': -15000
+    };
+    conditionAdjustment = conditionValues[property.condition];
+  }
+
+  if (property.landArea && property.propertyType === 'house') {
+    landAdjustment = Math.min(property.landArea * 50, 50000);
+  }
+
+  return {
+    dpe: dpeAdjustment,
+    floor: floorAdjustment,
+    parking: (property.parkingSpaces || 0) * 15000,
+    cellar: property.hasCellar ? 5000 : 0,
+    balcony: property.balconyArea ? Math.min(property.balconyArea * 500, 15000) : 0,
+    pool: property.hasPool ? 25000 : 0,
+    land: landAdjustment,
+    condition: conditionAdjustment,
+  };
+}
+
+function calculateConfidenceScore(comparables: DVFSale[], targetLat: number, targetLon: number, radiusUsed: number): number {
+  let score = 0;
+  const countScore = Math.min((comparables.length / 20) * 40, 40);
+  score += countScore;
+  
+  const avgDistance = comparables.reduce((sum, c) => sum + c.distance!, 0) / comparables.length;
+  const distanceScore = Math.max(0, 30 - (avgDistance / (radiusUsed * 500)) * 30);
+  score += distanceScore;
+  
+  const avgAge = comparables.reduce((sum, c) => {
+    const saleDate = new Date(c.date);
+    const monthsAgo = (Date.now() - saleDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
+    return sum + monthsAgo;
+  }, 0) / comparables.length;
+  const ageScore = Math.max(0, 15 - (avgAge / 6) * 15);
+  score += ageScore;
+  
+  const prices = comparables.map(c => c.pricePerSqm).sort((a, b) => a - b);
+  const median = prices[Math.floor(prices.length / 2)];
+  const dispersion = prices.reduce((sum, p) => sum + Math.abs(p - median), 0) / prices.length / median;
+  const dispersionScore = Math.max(0, 15 - dispersion * 150);
+  score += dispersionScore;
+  
+  return Math.round(Math.min(score, 100));
+}
