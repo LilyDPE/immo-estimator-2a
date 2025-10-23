@@ -1,15 +1,14 @@
 import { DVFSale } from '@/types';
+import pako from 'pako';
 
-const DVF_API_BASE = 'https://files.data.gouv.fr/geo-dvf/latest/csv';
+// URL CORRIGÉE avec l'année 2024 et le dossier departements
+const DVF_API_BASE = 'https://files.data.gouv.fr/geo-dvf/latest/csv/2024/departements';
 
 // Fonction pour extraire le département du code postal
 function getDepartmentFromPostalCode(postalCode: string): string {
-  // Les codes postaux français commencent par 2 ou 3 chiffres (département)
   if (postalCode.startsWith('97') || postalCode.startsWith('98')) {
-    // DOM-TOM : 3 chiffres
     return postalCode.substring(0, 3);
   }
-  // Métropole : 2 chiffres
   return postalCode.substring(0, 2);
 }
 
@@ -19,26 +18,35 @@ const dvfCache: { [key: string]: any[] } = {};
 async function loadDVFDataForDepartment(postalCode: string): Promise<any[]> {
   const department = getDepartmentFromPostalCode(postalCode);
   
-  // Vérifier si les données sont déjà en cache
+  console.log(`🔍 Code postal: ${postalCode} → Département: ${department}`);
+  
   if (dvfCache[department]) {
-    console.log(`📦 Données DVF du département ${department} déjà en cache`);
+    console.log(`📦 Données DVF du département ${department} déjà en cache (${dvfCache[department].length} records)`);
     return dvfCache[department];
   }
 
-  console.log(`⬇️ Téléchargement des données DVF pour le département ${department}...`);
-  
-  const url = `${DVF_API_BASE}/${department}.csv`;
+  // URL CORRIGÉE avec .csv.gz
+  const url = `${DVF_API_BASE}/${department}.csv.gz`;
+  console.log(`⬇️ Téléchargement: ${url}`);
   
   try {
     const response = await fetch(url);
+    console.log(`📡 Response status: ${response.status}`);
     
     if (!response.ok) {
       console.error(`❌ Erreur HTTP ${response.status} pour ${url}`);
       return [];
     }
 
-    const csvText = await response.text();
-    const lines = csvText.split('\n');
+    // Décompresser le fichier GZIP
+    const arrayBuffer = await response.arrayBuffer();
+    console.log(`📦 Fichier téléchargé: ${arrayBuffer.byteLength} bytes (compressé)`);
+    
+    const decompressed = pako.inflate(new Uint8Array(arrayBuffer), { to: 'string' });
+    console.log(`📄 Fichier décompressé: ${decompressed.length} caractères`);
+    
+    const lines = decompressed.split('\n');
+    console.log(`📝 Nombre de lignes: ${lines.length}`);
     
     if (lines.length < 2) {
       console.error(`❌ Fichier CSV vide pour le département ${department}`);
@@ -46,6 +54,8 @@ async function loadDVFDataForDepartment(postalCode: string): Promise<any[]> {
     }
 
     const headers = lines[0].split(',');
+    console.log(`📋 Headers (premiers 10):`, headers.slice(0, 10));
+    
     const data = lines.slice(1)
       .filter(line => line.trim().length > 0)
       .map(line => {
@@ -59,9 +69,11 @@ async function loadDVFDataForDepartment(postalCode: string): Promise<any[]> {
 
     console.log(`✅ ${data.length} transactions chargées pour le département ${department}`);
     
-    // Mettre en cache
-    dvfCache[department] = data;
+    if (data.length > 0) {
+      console.log(`🔍 Premier enregistrement:`, data[0]);
+    }
     
+    dvfCache[department] = data;
     return data;
   } catch (error) {
     console.error(`❌ Erreur lors du chargement des données DVF pour ${department}:`, error);
@@ -88,15 +100,20 @@ export async function searchComparableSales(
   targetSurface: number,
   postalCode: string
 ): Promise<DVFSale[]> {
-  console.log(`🔍 Recherche de comparables dans un rayon de ${radiusKm}km pour le code postal ${postalCode}`);
+  console.log(`🔍 Recherche de comparables:`);
+  console.log(`   - Rayon: ${radiusKm}km`);
+  console.log(`   - Code postal: ${postalCode}`);
+  console.log(`   - Type: ${propertyType}`);
+  console.log(`   - Surface cible: ${targetSurface}m²`);
 
-  // Charger les données DVF du département
   const dvfData = await loadDVFDataForDepartment(postalCode);
 
   if (dvfData.length === 0) {
-    console.log('❌ Aucune donnée DVF disponible pour ce département');
+    console.log('❌ Aucune donnée DVF disponible');
     return [];
   }
+
+  console.log(`📊 ${dvfData.length} transactions totales dans le département`);
 
   const typeLocalMapping = {
     apartment: ['Appartement'],
@@ -111,27 +128,21 @@ export async function searchComparableSales(
 
   const sales: DVFSale[] = dvfData
     .filter(record => {
-      // Filtrer par type de local
       if (!allowedTypes.includes(record.type_local)) return false;
-
-      // Filtrer par surface
+      
       const surface = parseFloat(record.surface_reelle_bati);
       if (isNaN(surface) || surface < surfaceMin || surface > surfaceMax) return false;
-
-      // Filtrer par date (3 dernières années)
+      
       const saleDate = new Date(record.date_mutation);
       if (saleDate < threeYearsAgo) return false;
-
-      // Filtrer par prix (éliminer les valeurs aberrantes)
+      
       const price = parseFloat(record.valeur_fonciere);
       if (isNaN(price) || price < 10000 || price > 10000000) return false;
-
-      // Vérifier les coordonnées GPS
+      
       const lat = parseFloat(record.latitude);
       const lon = parseFloat(record.longitude);
       if (isNaN(lat) || isNaN(lon)) return false;
-
-      // Filtrer par distance
+      
       const distance = haversineDistance(latitude, longitude, lat, lon);
       if (distance > radiusKm) return false;
 
@@ -178,9 +189,8 @@ export async function getMarketStatistics(
   numberOfSales: number;
   period: string;
 }> {
-  console.log(`📊 Calcul des statistiques de marché pour le code postal ${postalCode}`);
+  console.log(`📊 Calcul des statistiques de marché pour ${postalCode}`);
 
-  // Charger les données DVF du département
   const dvfData = await loadDVFDataForDepartment(postalCode);
 
   if (dvfData.length === 0) {
