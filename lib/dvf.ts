@@ -71,7 +71,7 @@ export async function searchComparableSales(
       };
     });
 
-    return sales.filter(s => s.distance <= radiusKm * 1000).sort((a, b) => a.distance! - b.distance!);
+    return sales.filter(s => s.distance !== undefined && s.distance <= radiusKm * 1000).sort((a, b) => a.distance! - b.distance!);
 
   } catch (error) {
     console.error('❌ Error:', error);
