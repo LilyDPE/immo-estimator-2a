@@ -1,7 +1,7 @@
 import NodeCache from 'node-cache';
 import { DVFSale } from '@/types';
 
-const cache = new NodeCache({ stdTTL: 86400 }); // Cache 24h
+const cache = new NodeCache({ stdTTL: 86400 });
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
@@ -17,6 +17,34 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 
 function generateId(): string {
   return `dvf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Obtenir le code commune à partir de coordonnées GPS
+async function getCommuneCode(lat: number, lon: number): Promise<string | null> {
+  try {
+    const url = `https://geo.api.gouv.fr/communes?lat=${lat}&lon=${lon}&fields=code&format=json&geometry=centre`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data[0]?.code || null;
+  } catch (error) {
+    console.error('Error getting commune code:', error);
+    return null;
+  }
+}
+
+// Obtenir les sections cadastrales d'une commune
+async function getSections(codeCommune: string): Promise<string[]> {
+  try {
+    const url = `https://app.dvf.etalab.gouv.fr/api/sections/${codeCommune}`;
+    const response = await fetch(url);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.sections || [];
+  } catch (error) {
+    console.error('Error getting sections:', error);
+    return [];
+  }
 }
 
 export async function searchComparableSales(
@@ -38,80 +66,85 @@ export async function searchComparableSales(
   try {
     console.log(`🔍 Searching DVF: lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
     
-    // Conversion radius en mètres (l'API attend des mètres)
-    const distMeters = radiusKm * 1000;
+    // 1. Obtenir le code commune
+    const codeCommune = await getCommuneCode(latitude, longitude);
+    if (!codeCommune) {
+      console.log('⚠️ Could not get commune code');
+      return [];
+    }
+    console.log(`📍 Commune code: ${codeCommune}`);
 
-    // Construction URL avec les BONS paramètres
-    const params = new URLSearchParams({
-      lat: latitude.toString(),
-      lon: longitude.toString(),
-      dist: distMeters.toString(),
-      nature_mutation: 'Vente'
-    });
+    // 2. Obtenir toutes les sections de la commune
+    const sections = await getSections(codeCommune);
+    console.log(`📊 Found ${sections.length} sections`);
 
-    const url = `https://api.cquest.org/dvf?${params.toString()}`;
-    console.log('📡 API URL:', url);
-
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      console.error(`❌ API error: ${response.status}`);
+    if (sections.length === 0) {
       return [];
     }
 
-    const data = await response.json();
-    console.log(`📦 API returned:`, JSON.stringify(data).substring(0, 200));
+    // 3. Interroger chaque section (limiter aux premières pour performance)
+    const maxSections = Math.min(sections.length, 10); // Limiter à 10 sections
+    const allMutations: any[] = [];
 
-    // L'API retourne soit features[] (GeoJSON) soit resultats[]
-    const results = data.features || data.resultats || [];
-    console.log(`📊 Found ${results.length} raw results`);
-
-    if (results.length === 0) {
-      console.log('⚠️ No results from API');
-      return [];
+    for (let i = 0; i < maxSections; i++) {
+      const section = sections[i];
+      try {
+        const url = `https://app.dvf.etalab.gouv.fr/api/mutations3/${codeCommune}/${section}`;
+        const response = await fetch(url);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.mutations) {
+            allMutations.push(...data.mutations);
+          }
+        }
+      } catch (error) {
+        console.log(`Error fetching section ${section}:`, error);
+      }
     }
 
-    // Transformation
-    const sales: DVFSale[] = results
-      .filter((item: any) => {
-        const props = item.properties || item;
-        return (
-          props.valeur_fonciere > 0 && 
-          props.surface_reelle_bati > 10 &&
-          (props.type_local === 'Maison' || props.type_local === 'Appartement')
-        );
+    console.log(`📦 Found ${allMutations.length} mutations`);
+
+    // 4. Filtrer et transformer
+    const sales: DVFSale[] = allMutations
+      .filter((m: any) => {
+        // Filtrer par type (Maison ou Appartement)
+        if (m.type_local !== 'Maison' && m.type_local !== 'Appartement') return false;
+        
+        // Filtrer par valeur foncière et surface
+        const valeur = parseFloat(m.valeur_fonciere);
+        const surf = parseFloat(m.surface_reelle_bati);
+        if (!valeur || valeur <= 0 || !surf || surf < 10) return false;
+
+        // Filtrer par date (X dernières années)
+        const saleDate = new Date(m.date_mutation);
+        const limitDate = new Date();
+        limitDate.setFullYear(limitDate.getFullYear() - years);
+        if (saleDate < limitDate) return false;
+
+        return true;
       })
-      .map((item: any) => {
-        const props = item.properties || item;
-        const coords = item.geometry?.coordinates || [props.longitude, props.latitude];
-        const [lon, lat] = coords;
-        
-        const dist = lat && lon ? calculateDistance(latitude, longitude, lat, lon) : 0;
-        
+      .map((m: any) => {
+        // Comme on n'a pas les coordonnées exactes, on utilise le centre de la commune
+        // Ce n'est pas parfait mais c'est mieux que rien
+        const dist = 0; // On ne peut pas calculer la distance précise
+
         return {
           id: generateId(),
-          date: props.date_mutation,
-          price: props.valeur_fonciere,
-          surface: props.surface_reelle_bati,
-          rooms: props.nombre_pieces_principales || 0,
-          type: props.type_local || 'unknown',
-          address: `${props.adresse_numero || ''} ${props.adresse_nom_voie || ''}, ${props.code_commune || ''}`.trim(),
-          latitude: lat || 0,
-          longitude: lon || 0,
+          date: m.date_mutation,
+          price: parseFloat(m.valeur_fonciere),
+          surface: parseFloat(m.surface_reelle_bati),
+          rooms: parseFloat(m.nombre_pieces_principales) || 0,
+          type: m.type_local,
+          address: `${m.adresse_numero || ''} ${m.adresse_nom_voie || ''}, ${m.nom_commune || ''}`.trim(),
+          latitude: latitude, // Approximation
+          longitude: longitude, // Approximation
           distance: dist,
-          pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati)
+          pricePerSqm: Math.round(parseFloat(m.valeur_fonciere) / parseFloat(m.surface_reelle_bati))
         };
       })
-      .filter((s: DVFSale) => s.distance !== undefined && s.distance <= radiusKm)
-      .sort((a: DVFSale, b: DVFSale) => (a.distance || 0) - (b.distance || 0))
       .slice(0, maxResults);
 
-    console.log(`✅ Found ${sales.length} comparable sales`);
+    console.log(`✅ Returning ${sales.length} sales`);
     
     if (sales.length > 0) {
       cache.set(cacheKey, sales);
