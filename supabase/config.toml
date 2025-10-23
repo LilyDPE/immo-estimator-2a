@@ -1,0 +1,2 @@
+[functions.import-dvf]
+verify_jwt = false
