@@ -1,15 +1,7 @@
 import NodeCache from 'node-cache';
+import { DVFSale } from '@/types';
 
 const cache = new NodeCache({ stdTTL: 86400 }); // Cache 24h
-
-interface DVFSale {
-  date: string;
-  price: number;
-  surface: number;
-  pricePerSqm: number;
-  address: string;
-  distance?: number;
-}
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
@@ -21,6 +13,10 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.sin(dLon/2) * Math.sin(dLon/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
+}
+
+function generateId(): string {
+  return `dvf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 export async function searchComparableSales(
@@ -51,12 +47,12 @@ export async function searchComparableSales(
     const lon_min = longitude - lonDelta;
     const lon_max = longitude + lonDelta;
 
-    // Date (3 ans en arrière)
+    // Date (X ans en arrière)
     const startDate = new Date();
     startDate.setFullYear(startDate.getFullYear() - years);
     const date_mutation = startDate.toISOString().split('T')[0];
 
-    // Construction URL avec bounding box
+    // Construction URL
     const params = new URLSearchParams({
       lat_min: lat_min.toString(),
       lat_max: lat_max.toString(),
@@ -88,7 +84,7 @@ export async function searchComparableSales(
       return [];
     }
 
-    // Transformation
+    // Transformation avec TOUS les champs requis
     const sales: DVFSale[] = data.features
       .filter((f: any) => 
         f.properties?.valeur_fonciere > 0 && 
@@ -102,12 +98,17 @@ export async function searchComparableSales(
         const dist = calculateDistance(latitude, longitude, lat, lon);
         
         return {
+          id: generateId(),
           date: props.date_mutation,
           price: props.valeur_fonciere,
           surface: props.surface_reelle_bati,
-          pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati),
+          rooms: props.nombre_pieces_principales || 0,
+          type: props.type_local || 'unknown',
           address: `${props.adresse_numero || ''} ${props.adresse_nom_voie || ''}, ${props.code_commune || ''}`.trim(),
-          distance: dist
+          latitude: lat,
+          longitude: lon,
+          distance: dist,
+          pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati)
         };
       })
       .filter((s: DVFSale) => s.distance !== undefined && s.distance <= radiusKm)
@@ -140,20 +141,3 @@ export async function getMarketStatistics(
   if (sales.length === 0) {
     return {
       averagePrice: 0,
-      medianPrice: 0,
-      numberOfSales: 0,
-      period: '3 dernières années'
-    };
-  }
-
-  const prices = sales.map(s => s.pricePerSqm).sort((a, b) => a - b);
-  const avg = Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length);
-  const med = prices[Math.floor(prices.length / 2)];
-
-  return {
-    averagePrice: avg,
-    medianPrice: med,
-    numberOfSales: sales.length,
-    period: '3 dernières années'
-  };
-}
