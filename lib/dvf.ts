@@ -38,27 +38,15 @@ export async function searchComparableSales(
   try {
     console.log(`🔍 Searching DVF: lat=${latitude}, lon=${longitude}, radius=${radiusKm}km`);
     
-    // Bounding box
-    const latDelta = radiusKm / 111.32;
-    const lonDelta = radiusKm / (111.32 * Math.cos(latitude * Math.PI / 180));
-    
-    const lat_min = latitude - latDelta;
-    const lat_max = latitude + latDelta;
-    const lon_min = longitude - lonDelta;
-    const lon_max = longitude + lonDelta;
+    // Conversion radius en mètres (l'API attend des mètres)
+    const distMeters = radiusKm * 1000;
 
-    // Date (X ans en arrière)
-    const startDate = new Date();
-    startDate.setFullYear(startDate.getFullYear() - years);
-    const date_mutation = startDate.toISOString().split('T')[0];
-
-    // Construction URL
+    // Construction URL avec les BONS paramètres
     const params = new URLSearchParams({
-      lat_min: lat_min.toString(),
-      lat_max: lat_max.toString(),
-      lon_min: lon_min.toString(),
-      lon_max: lon_max.toString(),
-      date_mutation: date_mutation
+      lat: latitude.toString(),
+      lon: longitude.toString(),
+      dist: distMeters.toString(),
+      nature_mutation: 'Vente'
     });
 
     const url = `https://api.cquest.org/dvf?${params.toString()}`;
@@ -77,25 +65,33 @@ export async function searchComparableSales(
     }
 
     const data = await response.json();
-    console.log(`📦 API returned ${data.features?.length || 0} features`);
+    console.log(`📦 API returned:`, JSON.stringify(data).substring(0, 200));
 
-    if (!data.features || data.features.length === 0) {
-      console.log('⚠️ No results');
+    // L'API retourne soit features[] (GeoJSON) soit resultats[]
+    const results = data.features || data.resultats || [];
+    console.log(`📊 Found ${results.length} raw results`);
+
+    if (results.length === 0) {
+      console.log('⚠️ No results from API');
       return [];
     }
 
-    // Transformation avec TOUS les champs requis
-    const sales: DVFSale[] = data.features
-      .filter((f: any) => 
-        f.properties?.valeur_fonciere > 0 && 
-        f.properties?.surface_reelle_bati > 10 &&
-        f.geometry?.coordinates?.[0] &&
-        f.geometry?.coordinates?.[1]
-      )
-      .map((f: any) => {
-        const props = f.properties;
-        const [lon, lat] = f.geometry.coordinates;
-        const dist = calculateDistance(latitude, longitude, lat, lon);
+    // Transformation
+    const sales: DVFSale[] = results
+      .filter((item: any) => {
+        const props = item.properties || item;
+        return (
+          props.valeur_fonciere > 0 && 
+          props.surface_reelle_bati > 10 &&
+          (props.type_local === 'Maison' || props.type_local === 'Appartement')
+        );
+      })
+      .map((item: any) => {
+        const props = item.properties || item;
+        const coords = item.geometry?.coordinates || [props.longitude, props.latitude];
+        const [lon, lat] = coords;
+        
+        const dist = lat && lon ? calculateDistance(latitude, longitude, lat, lon) : 0;
         
         return {
           id: generateId(),
@@ -105,19 +101,22 @@ export async function searchComparableSales(
           rooms: props.nombre_pieces_principales || 0,
           type: props.type_local || 'unknown',
           address: `${props.adresse_numero || ''} ${props.adresse_nom_voie || ''}, ${props.code_commune || ''}`.trim(),
-          latitude: lat,
-          longitude: lon,
+          latitude: lat || 0,
+          longitude: lon || 0,
           distance: dist,
           pricePerSqm: Math.round(props.valeur_fonciere / props.surface_reelle_bati)
         };
       })
-      .filter((s: DVFSale) => s.distance !== undefined && s.distance <= radiusKm)
-      .sort((a: DVFSale, b: DVFSale) => (a.distance || 0) - (b.distance || 0))
+      .filter((s: DVFSale) => s.distance <= radiusKm)
+      .sort((a: DVFSale, b: DVFSale) => a.distance - b.distance)
       .slice(0, maxResults);
 
-    console.log(`✅ Found ${sales.length} sales`);
+    console.log(`✅ Found ${sales.length} comparable sales`);
     
-    cache.set(cacheKey, sales);
+    if (sales.length > 0) {
+      cache.set(cacheKey, sales);
+    }
+    
     return sales;
 
   } catch (error) {
